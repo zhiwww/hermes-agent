@@ -16,10 +16,27 @@
 ## 红线（永远不要做）
 
 - ❌ **不要修改** `.github/workflows/docker-publish.yml` / `.github/workflows/deploy-site.yml` — 它们已有 `if: github.repository == 'NousResearch/hermes-agent'` 自动在 fork 上禁用。本地需求一律通过**新增** `.github/workflows/fork-*.yml` 文件实现。
-- ❌ **不要 `git push upstream`** — upstream remote 是只读的。
+- ❌ **不要 `git push upstream`** — upstream remote 是只读的（push URL 已设为 `no_push`）。
 - ❌ **不要 `git rebase`** 已推送到 `origin/main` 的 commit — 会破坏上游 merge 的可追溯性。
 - ❌ **不要在代码里硬编码** `zhiwww` / Docker Hub token / fork 专属 URL — 敏感信息走 GitHub Secrets，URL 走 env 变量。
 - ❌ **不要为了「让 diff 更干净」重构上游代码** — 每一次无关重构都会放大未来 merge 冲突。
+- ❌ **不要 "修复" 上游自己也没修的警告/错误** — 如果上游 CI 长期容忍某个 warning（比如 FlakeHub 认证失败），fork 也应该容忍。试图单方面修复会引入上游文件改动，得不偿失。先查上游 CI 状态再决定是否动手。
+
+## 诊断启发式（排查问题前必看）
+
+CI 或 workflow 失败时，**先问三个问题**再下手：
+
+1. **上游自己现在是什么状态？** 用 `gh run list --repo NousResearch/hermes-agent --workflow=<name> --branch main` 看上游最近几次的状态。
+   - 如果上游同一个 workflow 也在失败 → 不是 fork 的锅，是上游回归。选择：等上游修 / 自己加 additive 补丁。
+   - 如果上游是绿的 → 问题在 fork 引入的改动，聚焦排查最近的本地化 commit。
+2. **这个 workflow 有 fork 门禁吗？** `grep 'github.repository' .github/workflows/<name>.yml`
+   - 有门禁（如 `docker-publish.yml` / `deploy-site.yml`）→ 可以安全新建 `fork-*.yml` 并行替代。
+   - 无门禁（如 `nix.yml` / `Tests`）→ 新建并行文件会**双跑**，必须另想办法（忽略、或违反原则直接改文件）。
+3. **这个错误是 fatal 还是 warning？** 看 workflow 最终的 exit code，不要被 annotations 里的 ❌ 误导。annotation 可能只是 `continue-on-error` 步骤的软失败，不影响 job 结果。
+
+**真实案例**（2026-04-10）：
+- 第一天 merge 上游后 `fork-docker-publish.yml` 失败 on `pip resolution-too-deep`。查了上游 main 的 `docker-publish.yml`，上游同一个错误已经连续失败多次 → 不是 fork 的锅，等上游修。
+- Nix workflow 的 FlakeHub 认证警告，上游自己也有，不修，align with upstream。
 
 ## Upstream 同步规范
 
@@ -35,6 +52,7 @@
 ## Fork 专属约定
 
 - **Fork 专属文档**放在 `docs/local/` 目录。该目录 upstream 不会写入，零冲突。
-- **Fork 专属 workflow** 命名前缀 `fork-`，例如 `fork-docker-publish.yml`，便于识别和维护。
+- **Fork 专属 workflow** 命名前缀 `fork-`，例如 `fork-docker-publish.yml`，便于识别和维护。新建前先确认对应的上游 workflow 有 fork 门禁（见诊断启发式 #2）。
 - **Docker Hub namespace** 固定为 `zhiwww/`，镜像名 `zhiwww/hermes-agent`。
-- **本地化 commit message** 建议加前缀 `[fork]`，例如 `[fork] add fork-docker-publish workflow`，方便 `git log --grep='\[fork\]'` 快速定位本地化历史。
+- **本地化 commit message** 必须加前缀 `[fork]`，例如 `[fork] add fork-docker-publish workflow`，方便 `git log --grep='\[fork\]'` 快速定位本地化历史。**上游 merge commit 不加** `[fork]` 前缀（用 `chore: sync upstream <date>`），这样两种历史一眼可分。
+- **fork-* workflow 的 concurrency**：注意 `cancel-in-progress: true` 会在快速连续 push 时取消前一次 run；调试时要等完整结果，避免误判（前一次 run 可能只是被取消不是真的失败）。
