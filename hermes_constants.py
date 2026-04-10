@@ -111,5 +111,10 @@ AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 AI_GATEWAY_MODELS_URL = f"{AI_GATEWAY_BASE_URL}/models"
 AI_GATEWAY_CHAT_URL = f"{AI_GATEWAY_BASE_URL}/chat/completions"
 
-NOUS_API_BASE_URL = "https://inference-api.nousresearch.com/v1"
+# [fork] Allow overriding the Nous inference endpoint via env so forks can
+# point at their own proxy or self-hosted gateway without touching code.
+# Default preserves upstream behavior — zero impact if unset.
+NOUS_API_BASE_URL = os.getenv(
+    "NOUS_API_BASE_URL", "https://inference-api.nousresearch.com/v1"
+)
 NOUS_API_CHAT_URL = f"{NOUS_API_BASE_URL}/chat/completions"
