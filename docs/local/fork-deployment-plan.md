@@ -240,6 +240,16 @@ pyproject.toml merge=union
 
 ---
 
+## 已做出的决定（避免未来重复讨论）
+
+### FlakeHub Nix cache：放弃配置，与上游对齐
+
+- **背景**：`nix.yml` 里的 `magic-nix-cache-action@v13` 要求 FlakeHub 认证。上游自己也没配好（annotations 里一直有 `Unable to authenticate to FlakeHub` 的 ❌ warning，但 build 照样过）。
+- **尝试过**：fork 上注册了 FlakeHub 账号 + 在 repo settings 把 Workflow permissions 设为 "Read and write"（开启 `id-token: write`）。结果错误从「未注册」变成「Cannot find netrc credentials」—— 因为缺少 `DeterminateSystems/flakehub-login-action` 这一步把 OIDC token 写成 `~/.netrc`。
+- **为什么不修**：修复需要在 `nix.yml` 里插入一个 login step，这是修改上游文件，违反 additive 原则。而且 `nix.yml` 没有 fork 门禁，新建 `fork-nix.yml` 会和上游重复跑。
+- **决定**：放弃，与上游状态对齐。Nix build 当前 2-8 分钟可接受；未来上游如果自己给 `nix.yml` 加了 login step，我们 merge 时自动继承。
+- **不影响**：本地开发想用 FlakeHub cache 的话，直接 `flakehub login` 写 `~/.netrc` 即可，和 CI 解耦。
+
 ## 后续补充方向（不在本次范围）
 
 - 把 `.env.example` 整理一份 fork 专属版本
