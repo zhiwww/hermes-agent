@@ -21,6 +21,32 @@
 - ❌ **不要在代码里硬编码** `zhiwww` / Docker Hub token / fork 专属 URL — 敏感信息走 GitHub Secrets，URL 走 env 变量。
 - ❌ **不要为了「让 diff 更干净」重构上游代码** — 每一次无关重构都会放大未来 merge 冲突。
 - ❌ **不要 "修复" 上游自己也没修的警告/错误** — 如果上游 CI 长期容忍某个 warning（比如 FlakeHub 认证失败），fork 也应该容忍。试图单方面修复会引入上游文件改动，得不偿失。先查上游 CI 状态再决定是否动手。
+- ❌ **不要在不确定「本地 / 远端」的情况下执行 stateful 命令** — hermes 部署跨两台机器（workstation 只跑 git，home- 跑 runtime），每次 rsync/restart/编辑/launchd 变更前都要明确当前操作的是哪台。详情见下一节。
+
+## workstation vs home- 双机操作规范 ⚠️
+
+hermes 维护涉及**两台机器**，角色完全不同，混淆会造成数据损失或无效操作：
+
+| 机器 | 角色 | 上面有什么 |
+|---|---|---|
+| **workstation**（本仓库 checkout 所在的 Mac）| Git 操作 — 上游 merge、冲突解决、编辑源码、commit、push | `/Users/zwi/Projects/hermes-agent` 的 fork 仓库。**没有** venv、hermes CLI、`~/.hermes`、launchd 服务 |
+| **home-**（Tailscale `zwi-mini.tail30560e.ts.net`）| Runtime — hermes 实际跑的地方 | `~/Projects/hermes-agent` + venv + 3 个 gateway launchd 服务 + `~/.hermes/` |
+
+**任何 stateful 操作前必须确认当前机器**（`hostname` / `uname -n`），并在对话中显式声明：
+- "这条命令在 workstation 上跑"
+- "这条命令在 home- 上跑（通过 ssh）"
+- "这条命令在 home- 上跑（local，不用 ssh）"
+
+常犯错误：
+- 在 workstation 编辑完 `config.yaml` 以为 home- 立刻生效（没 rsync）
+- 在 workstation 跑 `hermes gateway restart`（命令不存在，没 install）
+- rsync 源和目标搞反（legacy 就是被这样覆盖过）
+- 在 home- 上 `git pull` 但 workstation 还没 merge upstream
+- 在 workstation 上以为 `~/.hermes/` 是 home- 的 HERMES_HOME（workstation 根本没这个目录）
+
+命令模板和完整的版本升级流程见 `docs/local/deploy-home.md`：
+- 「Operating contexts」段 — 两种运行模式
+- 「Version updates / upgrading the fork」段 — 7 步升级流程
 
 ## 诊断启发式（排查问题前必看）
 

@@ -14,6 +14,49 @@ show the canonical `/Volumes/Store/...` path — same directory).
 **HERMES_HOME** = `~/.hermes` (default layout — NOT the repo dir; see
 [Path conflict](#why-hermes_home--repo-dir-is-forbidden) below).
 
+## Operating contexts: workstation vs home- ⚠️
+
+hermes maintenance happens across **two machines** with different roles.
+**Before any stateful command**, you MUST know which machine you're
+operating on.
+
+| Machine | Role | What's on it |
+|---|---|---|
+| **workstation** (this Mac, where the fork repo checkout lives) | Git operations only — upstream merge, conflict resolution, editing source, committing, pushing | Fork repo at `/Users/zwi/Projects/hermes-agent`. No venv, no hermes CLI install, no `~/.hermes`, no gateway services. |
+| **home-** (Tailscale `zwi-mini.tail30560e.ts.net`) | Runtime — where hermes actually runs | Fork repo at `~/Projects/hermes-agent` + venv + 3 gateway launchd services + `~/.hermes/` HERMES_HOME |
+
+Any command can be executed in one of two modes:
+
+1. **Remote mode**: sitting at the workstation, wrap commands with
+   `ssh home- '...'`. This is how the assistant usually runs things.
+2. **Local-on-home- mode**: sitting at (or tmux'd into) home-, run
+   commands directly with no ssh wrapper.
+
+**Confirmation checklist before any stateful command** (file edit, rsync,
+gateway restart, launchd install/uninstall, config change, service kill):
+
+- [ ] `hostname` shows the expected machine (`zwi-mini` for home-, your
+      workstation name otherwise)
+- [ ] Paths match the intended machine: `/Users/zwi/Projects/hermes-agent`
+      exists as a git repo on both machines, but `venv/`, `~/.hermes/`,
+      `~/.local/bin/hermes`, and launchd plists only exist on home-.
+- [ ] When used with the assistant, state the context explicitly:
+      "this runs on home- via ssh" or "this runs on the workstation".
+
+**Common mistakes to avoid**:
+- Editing a file locally on the workstation and expecting the change to
+  reflect on home- (must rsync or git pull first).
+- Running `hermes gateway restart` on the workstation (command doesn't
+  exist there — no install).
+- Running `rsync` with source/destination swapped (legacy has been
+  overwritten this way; double-check which side is which).
+- Running `git pull` on home- when upstream has not yet been merged on
+  the workstation (merge happens on workstation first, then sync).
+
+The commands below are written in **SSH form** (`ssh home- '...'`). To
+run them local-on-home-, strip the `ssh home- '...'` wrapper and the
+outer quotes.
+
 ## Deployment phases
 
 ### Phase 0 — Build staging dir (on workstation)
@@ -267,6 +310,144 @@ list` — that command's Gateway column has a display bug and reports
 **Note**: all three profiles have independent Slack Apps in the legacy
 setup. Logs should show three distinct `Authenticated as @<bot>` lines:
 `@agent` (default), `@z-bot` (coder), `@ea` (ea).
+
+## Version updates / upgrading the fork
+
+Routine workflow when upstream ships new commits or you add local fork
+patches. **Runs across both machines** — re-read "Operating contexts"
+above before each step.
+
+### Step 1 — sync upstream on **workstation**
+
+```sh
+# on workstation
+cd /Users/zwi/Projects/hermes-agent
+git status                                       # must be clean
+git fetch upstream
+git log --oneline main..upstream/main            # preview new commits
+git diff main..upstream/main -- pyproject.toml package.json hermes_constants.py  # check conflict-prone files
+
+git merge upstream/main --no-ff -m "chore: sync upstream $(date +%Y-%m-%d)"
+# If conflict in pyproject.toml / package.json / hermes_constants.py:
+#   git checkout --theirs <file>   # take upstream
+#   # then manually re-apply the fork's small patch (authors, URLs, env override)
+#   git add <file>
+#   git merge --continue
+
+git push origin main
+```
+
+### Step 2 — sync code to **home-**
+
+Two options, pick based on whether home- can reach GitHub:
+
+**Option A (recommended — no GitHub SSH key needed on home-)**: rsync
+from workstation. Requires a workstation copy of the repo, which we do
+have at `/Users/zwi/Projects/hermes-agent`.
+
+```sh
+# on workstation (rsync pushes to home-)
+rsync -az \
+  --exclude='venv/' --exclude='__pycache__/' --exclude='*.pyc' \
+  --exclude='node_modules/' --exclude='.pytest_cache/' \
+  --exclude='*.swp' --exclude='.DS_Store' \
+  --exclude='.mypy_cache/' --exclude='.ruff_cache/' \
+  /Users/zwi/Projects/hermes-agent/ home-:Projects/hermes-agent/
+```
+
+**Option B**: `git pull` directly on home-. Requires home- to have a
+GitHub SSH key with access to `zhiwww/hermes-agent`.
+
+```sh
+# on workstation
+ssh home- 'cd ~/Projects/hermes-agent && git pull --ff-only origin main'
+```
+
+### Step 3 — refresh deps on **home-** (only if pyproject/uv.lock changed)
+
+```sh
+# on workstation, via ssh
+ssh home- 'cd ~/Projects/hermes-agent && VIRTUAL_ENV=venv uv sync --all-extras --locked'
+```
+
+If uv.lock didn't change, this is a no-op and safe to skip.
+
+### Step 4 — re-verify `sitecustomize.py` + `truststore` on **home-**
+
+Only needed if Python minor version changed, certifi was reinstalled,
+or the site-packages path moved. Quick check:
+
+```sh
+ssh home- '~/Projects/hermes-agent/venv/bin/python -c "
+import ssl
+ctx = ssl.create_default_context()
+assert \"truststore\" in type(ctx).__module__, \"FIX: re-run Phase 2.5\"
+print(\"OK truststore still active\")
+"'
+```
+
+If this fails, re-run Phase 2.5.
+
+### Step 5 — restart all gateway services on **home-**
+
+```sh
+ssh home- '
+  ~/.local/bin/hermes gateway restart
+  ~/.local/bin/hermes -p coder gateway restart
+  ~/.local/bin/hermes -p ea gateway restart
+'
+```
+
+### Step 6 — verify
+
+```sh
+# All 3 gateways running
+ssh home- 'launchctl list | grep ai.hermes.gateway'
+
+# Recent logs — look for "Authenticated as @<bot>" and no recent errors
+ssh home- '
+  for P in default coder ea; do
+    B=~/.hermes
+    [ "$P" = default ] || B=~/.hermes/profiles/$P
+    echo "--- $P ---"
+    grep -E "Authenticated as|response ready|API call failed" $B/logs/gateway.log | tail -3
+  done
+'
+```
+
+Then test each bot via Slack (if you changed anything in message
+handling, auth, or providers).
+
+### Step 7 — commit the bump (if any fork patches added)
+
+```sh
+# on workstation
+cd /Users/zwi/Projects/hermes-agent
+# if the merge produced [fork] patches or doc updates, commit them:
+git add -p
+git commit -m "[fork] ..."
+git push origin main
+# and re-deploy to home- via Step 2
+```
+
+### Rollback of a failed upgrade
+
+```sh
+# on workstation
+git reset --hard <previous-sha>         # only if not yet shared
+git push --force-with-lease              # ONLY if truly necessary
+
+# on home- (via ssh)
+ssh home- 'cd ~/Projects/hermes-agent && git reset --hard <previous-sha>'
+# Or re-rsync from the workstation's reverted state.
+
+# Restart gateways
+ssh home- '
+  ~/.local/bin/hermes gateway restart
+  ~/.local/bin/hermes -p coder gateway restart
+  ~/.local/bin/hermes -p ea gateway restart
+'
+```
 
 ## Post-deployment TODO
 
