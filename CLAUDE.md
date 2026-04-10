@@ -38,6 +38,12 @@ CI 或 workflow 失败时，**先问三个问题**再下手：
 - 第一天 merge 上游后 `fork-docker-publish.yml` 失败 on `pip resolution-too-deep`。查了上游 main 的 `docker-publish.yml`，上游同一个错误已经连续失败多次 → 不是 fork 的锅，等上游修。
 - Nix workflow 的 FlakeHub 认证警告，上游自己也有，不修，align with upstream。
 
+## Hermes-specific 陷阱
+
+- ⚠️ **`hermes doctor --fix` 会把 config.yaml 里的 `${VAR}` 引用展开成明文**。如果你在 `config.yaml` 里用了 `api_key: ${LLM_ZWI_API_KEY}` 之类的 env 变量引用，跑 `--fix` 之后会变成 `api_key: sk-xxxxxxxx` 明文写回文件，撤销 env 变量间接化。**默认不要跑 `hermes doctor --fix`**。如果必须跑，修完后立刻用 sed 把明文 key 恢复成 `${VAR}` 引用。详情见 `docs/local/deploy-home.md` 的「Gotchas」段。
+- ⚠️ **`HERMES_HOME` 不能等于 fork repo 根目录**。`tools/skills_sync.py` 会 `shutil.copytree(<repo>/skills/, $HERMES_HOME/skills/)`，同路径会 `FileExistsError`。标准布局：repo 在 `~/Projects/hermes-agent`，HERMES_HOME 用默认 `~/.hermes`。
+- ⚠️ **home- 的 `~/Projects` 是 symlink 到 `/Volumes/Store/Projects`**（外置 SSD）。`hermes --version` 显示的 `Project: /Volumes/Store/...` 是规范化后的真实路径，不是另一个安装。
+
 ## Upstream 同步规范
 
 - 上游同步**一律用 merge，不用 rebase**。理由：保留上游 commit hash 可追溯，避免 force push 风险。
