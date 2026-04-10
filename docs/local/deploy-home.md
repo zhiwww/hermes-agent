@@ -32,8 +32,12 @@ cp -R ~/legacy-hermes/docs       "$STAGING/"   # Slack manifests
 cp -R ~/legacy-hermes/cron       "$STAGING/"
 find "$STAGING/cron" -name '.tick.lock' -delete
 
-# Per-profile (coder, ea)
+# Per-profile (coder, ea) — IMPORTANT: each profile has its own .env
+# (a dotfile, easy to miss with plain `ls`). Profiles read their own
+# .env, not the main ~/.hermes/.env, so missing it means no Slack tokens
+# and the gateway starts with "No messaging platforms enabled".
 for p in coder ea; do
+  cp ~/legacy-hermes/profiles/$p/.env        "$STAGING/profiles/$p/"
   cp ~/legacy-hermes/profiles/$p/config.yaml "$STAGING/profiles/$p/"
   cp ~/legacy-hermes/profiles/$p/SOUL.md     "$STAGING/profiles/$p/"
   cp ~/legacy-hermes/profiles/$p/honcho.json "$STAGING/profiles/$p/"
@@ -160,10 +164,34 @@ ssh home- 'rm -rf ~/Projects/hermes-agent ~/.hermes ~/.local/bin/hermes'
 This removes the fork clone, HERMES_HOME (including migrated state),
 and the CLI symlink. `~/.zshrc` was not modified.
 
+## Post-deployment: install gateway services
+
+Each profile has its own gateway launchd service. After Phase 3:
+
+```sh
+# Default profile gateway
+ssh home- '~/.local/bin/hermes gateway install'
+
+# Per-profile — create alias first so hermes -p <name> works, then install
+ssh home- '~/.local/bin/hermes profile alias coder && ~/.local/bin/hermes -p coder gateway install'
+ssh home- '~/.local/bin/hermes profile alias ea    && ~/.local/bin/hermes -p ea gateway install'
+```
+
+This creates three launchd plists:
+- `~/Library/LaunchAgents/ai.hermes.gateway.plist` (default)
+- `~/Library/LaunchAgents/ai.hermes.gateway-coder.plist`
+- `~/Library/LaunchAgents/ai.hermes.gateway-ea.plist`
+
+Verify via `launchctl list | grep ai.hermes.gateway` (not `hermes profile
+list` — that command's Gateway column has a display bug and reports
+"stopped" for profile gateways even when running).
+
+**Note**: all three profiles have independent Slack Apps in the legacy
+setup. Logs should show three distinct `Authenticated as @<bot>` lines:
+`@agent` (default), `@z-bot` (coder), `@ea` (ea).
+
 ## Post-deployment TODO
 
-- [ ] Install Slack gateway service (legacy had `hermes gateway install`
-      running as a launchd agent — not deployed by this runbook)
 - [ ] Re-authenticate any provider that needs it (Anthropic, Codex) via
       `hermes auth login` if applicable
 - [ ] Configure scheduled cron jobs if any (legacy `cron/` was empty —
