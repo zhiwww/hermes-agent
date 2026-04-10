@@ -100,6 +100,55 @@ ssh home- 'cd ~/Projects/hermes-agent && printf "n\n" | ./setup-hermes.sh'
 Creates `~/Projects/hermes-agent/venv`, runs `uv sync --all-extras --locked`,
 seeds `~/.hermes/skills/` with 77 bundled skills, symlinks `~/.local/bin/hermes`.
 
+### Phase 2.5 — Inject truststore (REQUIRED for private-CA LLM endpoints)
+
+Python's `ssl` module uses `certifi`'s Mozilla CA bundle and does NOT
+read macOS Keychain. If the LLM endpoint (`llm.zwi`) is behind a reverse
+proxy with a private CA you've trusted in Keychain, Python will reject
+the TLS handshake with `CERTIFICATE_VERIFY_FAILED` even though `curl`
+from the same machine works fine.
+
+**Fix**: install `truststore` and add a `sitecustomize.py` hook so all
+Python processes using this venv automatically inject it at startup.
+This makes Python `ssl` delegate to macOS Security framework (Keychain).
+
+```sh
+ssh home- '
+VENV=~/Projects/hermes-agent/venv
+VIRTUAL_ENV=$VENV uv pip install truststore
+SITE=$($VENV/bin/python -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")
+cat > "$SITE/sitecustomize.py" << "PY"
+"""Auto-injected at Python startup: use macOS/OS trust store for TLS.
+Makes Python httpx/requests/etc. trust any CA in macOS Keychain
+(matches curl/Safari behavior). No code changes in hermes required.
+"""
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+PY
+'
+```
+
+**Verify**:
+```sh
+ssh home- '~/Projects/hermes-agent/venv/bin/python -c "
+import ssl, httpx
+ctx = ssl.create_default_context()
+assert \"truststore\" in type(ctx).__module__, \"truststore not active\"
+r = httpx.get(\"https://llm.zwi/v1/models\", timeout=15)
+print(\"OK\", r.status_code)
+"'
+```
+
+Should print `OK 401` (401 is expected without api key). If you see
+`CERTIFICATE_VERIFY_FAILED` instead, the sitecustomize.py didn't run
+(check the path with `$VENV/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])"`).
+
+**Skip this phase if** all LLM endpoints use public CAs (OpenAI, Anthropic,
+Codex via chatgpt.com, public OpenRouter endpoints, etc.).
+
 ### Phase 3 — rsync staging → remote HERMES_HOME
 
 ```sh
@@ -120,12 +169,41 @@ ssh home- '~/.local/bin/hermes doctor'
 
 ## Gotchas
 
+### Python `ssl` doesn't read macOS Keychain (TLS trust)
+
+See Phase 2.5. Symptom: `hermes gateway` logs show "Connection error"
+for LLM calls, and you find `httpx.ConnectError: [SSL:
+CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain`
+in the error details. Meanwhile `curl https://<endpoint>` works fine on
+the same machine. The fix is `truststore` + `sitecustomize.py` (Phase
+2.5). This has nothing to do with the venv — system Python behaves the
+same way.
+
+**Debugging tip**: before blaming a config issue (missing api key, bad
+URL, wrong headers), confirm the HTTPS connection itself is reachable
+from the venv Python:
+
+```sh
+$VENV/bin/python -c "
+import httpx
+print(httpx.get('https://<endpoint>/v1/models', timeout=10).status_code)
+"
+```
+
+If this raises a TLS error, fix the trust chain first. Application-level
+errors (401, 404, etc.) only matter once this works.
+
 ### `hermes doctor --fix` expands `${VAR}` to plaintext
 
 `hermes doctor --fix` writes the **resolved** in-memory config back to
 `config.yaml`, which means any `${LLM_ZWI_API_KEY}` reference becomes the
 literal `sk-...` string. This silently undoes the env var indirection
 from decision 4b.
+
+**Important**: env var references themselves work fine in the gateway
+path — `gateway/run.py` reads the api_key through `hermes_cli/config.py`
+which calls `_expand_env_vars()`. It's only `doctor --fix`'s write-back
+that loses the indirection.
 
 **Workaround**: run the fix, then immediately re-apply the env var
 references (and sync staging back from the fixed file):

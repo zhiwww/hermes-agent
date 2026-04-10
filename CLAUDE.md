@@ -37,10 +37,12 @@ CI 或 workflow 失败时，**先问三个问题**再下手：
 **真实案例**（2026-04-10）：
 - 第一天 merge 上游后 `fork-docker-publish.yml` 失败 on `pip resolution-too-deep`。查了上游 main 的 `docker-publish.yml`，上游同一个错误已经连续失败多次 → 不是 fork 的锅，等上游修。
 - Nix workflow 的 FlakeHub 认证警告，上游自己也有，不修，align with upstream。
+- home- 部署后 Slack 测试失败，litellm 日志显示 "No api key passed in"。第一反应：hermes 没展开 `${VAR}`。**错了** —— 那条 litellm 日志是我 1 分钟前跑的 curl 留下的，hermes 请求**从未到达 litellm**。真正的错误是 Python httpx 不信任私有 CA（TLS `CERTIFICATE_VERIFY_FAILED`），被 hermes 包装成 "Connection error"。**教训：多源日志要先对齐时间戳再下因果判断**。
 
 ## Hermes-specific 陷阱
 
-- ⚠️ **`hermes doctor --fix` 会把 config.yaml 里的 `${VAR}` 引用展开成明文**。如果你在 `config.yaml` 里用了 `api_key: ${LLM_ZWI_API_KEY}` 之类的 env 变量引用，跑 `--fix` 之后会变成 `api_key: sk-xxxxxxxx` 明文写回文件，撤销 env 变量间接化。**默认不要跑 `hermes doctor --fix`**。如果必须跑，修完后立刻用 sed 把明文 key 恢复成 `${VAR}` 引用。详情见 `docs/local/deploy-home.md` 的「Gotchas」段。
+- ⚠️ **Python `ssl` 模块不读 macOS Keychain**，所有 Python HTTPS（httpx / requests / openai SDK / aiohttp）只认 `certifi` 包里的 Mozilla CA bundle。如果 hermes 要访问一个用**私有 CA 签名的 LLM endpoint**（比如你自建的 `llm.zwi` 反代），curl 能过但 Python 会 `CERTIFICATE_VERIFY_FAILED`。**fix-friendly 方案**：在 venv 里装 `truststore` 并写 `sitecustomize.py` 做启动注入，让 Python 使用 macOS Security framework（= Keychain）。详见 `docs/local/deploy-home.md` 的「Phase 2.5」段。**这和 venv 无关**，系统 Python 也一样。
+- ⚠️ **`hermes doctor --fix` 会把 config.yaml 里的 `${VAR}` 引用展开成明文**。如果你在 `config.yaml` 里用了 `api_key: ${LLM_ZWI_API_KEY}` 之类的 env 变量引用，跑 `--fix` 之后会变成 `api_key: sk-xxxxxxxx` 明文写回文件，撤销 env 变量间接化。**默认不要跑 `hermes doctor --fix`**。如果必须跑，修完后立刻用 sed 把明文 key 恢复成 `${VAR}` 引用。注意：env 变量引用**本身工作正常** —— gateway 路径会正确展开 `${VAR}`，只是 `doctor --fix` 写回时会落成明文。
 - ⚠️ **`HERMES_HOME` 不能等于 fork repo 根目录**。`tools/skills_sync.py` 会 `shutil.copytree(<repo>/skills/, $HERMES_HOME/skills/)`，同路径会 `FileExistsError`。标准布局：repo 在 `~/Projects/hermes-agent`，HERMES_HOME 用默认 `~/.hermes`。
 - ⚠️ **home- 的 `~/Projects` 是 symlink 到 `/Volumes/Store/Projects`**（外置 SSD）。`hermes --version` 显示的 `Project: /Volumes/Store/...` 是规范化后的真实路径，不是另一个安装。
 
