@@ -1,67 +1,45 @@
-# Deploying Fork to `home-` Server (Runbook)
+# Hermes Fork Runbook (home-)
 
 ## Context
 
-Deploy the fork (`zhiwww/hermes-agent`) to the remote macOS host `home-`
-(Tailscale: `zwi-mini.tail30560e.ts.net`, `~` = `/Users/zwi`), migrating
-selected state from `~/legacy-hermes/` on the local workstation to
-`~/.hermes/` on the server.
+This runbook covers day-to-day maintenance of the fork
+(`zhiwww/hermes-agent`) on **home-** (`zwi-mini.tail30560e.ts.net`,
+`~` = `/Users/zwi`). home- is the only machine the fork runs on — no
+workstation, no staging server, no cluster. All commands in this
+document are plain shell commands run directly on home-.
 
-**Repo** lives at `~/Projects/hermes-agent` on home- (note: `~/Projects`
-is a symlink to `/Volumes/Store/Projects`, so `hermes --version` will
-show the canonical `/Volumes/Store/...` path — same directory).
+**Repo** lives at `~/Projects/hermes-agent` (note: `~/Projects` is a
+symlink to `/Volumes/Store/Projects`, so `hermes --version` reports the
+canonical `/Volumes/Store/...` path — same directory).
 
 **HERMES_HOME** = `~/.hermes` (default layout — NOT the repo dir; see
 [Path conflict](#why-hermes_home--repo-dir-is-forbidden) below).
 
-## Operating model: home- is the single source of truth ⚠️
+## Operating model: home- is the only machine ⚠️
 
-**2026-04-10 decision**: all hermes operations (git and runtime) happen
-**on home- only**. The workstation is no longer part of the deployment
-loop.
+All hermes operations — git (fetch/merge upstream, commit, push) and
+runtime (gateway restart, config edit, launchd) — happen **directly on
+home-**. There is no other machine involved. Commands in this document
+are plain shell commands assumed to run on home- locally (via Claude
+Code running on home-, a tmux session, or however you access it).
 
-| Machine | Role |
-|---|---|
-| **home-** (`zwi-mini.tail30560e.ts.net`) | The only place hermes lives. Repo, venv, CLI, HERMES_HOME, launchd services, git remotes — all on home-. |
-| **workstation** (your daily Mac) | Not involved. If a historical `/Users/zwi/Projects/hermes-agent/` checkout exists, it's frozen — do not edit, do not rsync, do not push from there. Safe to delete. |
-
-Two ways to execute commands on home-, pick whichever fits your context:
-
-1. **Remote (ssh from anywhere)**: `ssh home- '<command>'` — works from
-   the workstation, a laptop, your phone over Tailscale, anywhere.
-2. **Local-on-home-**: directly on home- (sitting at it, tmux session,
-   VS Code Remote SSH, etc.). Drop the `ssh home- '...'` wrapper.
-
-**Sanity checks before any stateful command** (file edit, rsync, gateway
-restart, launchd install/uninstall, config change, service kill):
-
-- [ ] Confirm you are operating on home-: `ssh home- hostname` should
-      return `zwi-mini`, or if local-on-home-, `hostname` shows
-      `zwi-mini`.
-- [ ] Never edit files under `/Users/zwi/Projects/hermes-agent/` on the
-      workstation — that checkout is frozen history.
-- [ ] For the assistant: state the execution context explicitly, e.g.
-      "this runs on home- via ssh from the workstation" or "this runs
-      on home- locally".
-
-The commands below are written in **SSH form** (`ssh home- '...'`) for
-the common case of driving home- from a laptop. Strip the wrapper when
-running directly on home-.
+Before any stateful command, a quick `hostname` check to confirm
+`zwi-mini` is worth the zero effort.
 
 ## Deployment phases (one-time bootstrap, historical reference)
 
-> **⚠️ These phases describe the initial deployment that migrated data
-> from `~/legacy-hermes` on the workstation to home-. That migration
-> happened on 2026-04-10 and will not repeat under normal operation.**
+> **⚠️ These phases are the frozen record of the 2026-04-10 initial
+> deployment. The commands below were originally executed from a
+> workstation via `ssh home- '...'` and `rsync`, because home- was
+> empty at the time and the legacy data lived on the workstation.**
+>
+> **This path is not re-usable as-is** — the workstation's `~/legacy-hermes`
+> no longer exists (cleaned up), and home- is now self-sufficient. The
+> phases are kept for forensics: "how did the current state come to be?"
 >
 > **For ongoing maintenance (upstream merges, fork patches, gateway
-> restarts), skip to [Version updates / upgrading the fork](#version-updates--upgrading-the-fork)
-> below — all steps run on home- via ssh, no workstation involvement.**
->
-> **Re-read these phases only if**:
-> - Deploying to a brand-new server
-> - Disaster recovery from a wiped home-
-> - You're debugging how the current setup was built
+> restarts, etc.), skip to [Version updates / upgrading the fork](#version-updates--upgrading-the-fork)
+> below — all plain commands that run locally on home-.**
 
 ### Phase 0 — Build staging dir (on workstation)
 
@@ -124,24 +102,25 @@ Intentionally **excluded** from staging:
 | `channel_directory.json`, `gateway_state.json` | runtime messaging state |
 | `profiles/*/workspace/`, `profiles/*/plans/` | runtime workspace state |
 
-### Phase 1 — rsync repo
+### Phase 1 — get the repo onto the target machine
+
+The 2026-04-10 bootstrap rsync'd an existing workstation checkout over to
+home-. On a fresh install today you would just:
 
 ```sh
-ssh home- 'mkdir -p ~/Projects'
-rsync -az \
-  --exclude='venv/' --exclude='__pycache__/' --exclude='*.pyc' \
-  --exclude='node_modules/' --exclude='.pytest_cache/' \
-  --exclude='*.swp' --exclude='.DS_Store' \
-  --exclude='.mypy_cache/' --exclude='.ruff_cache/' \
-  /Users/zwi/Projects/hermes-agent/ home-:Projects/hermes-agent/
+mkdir -p ~/Projects
+cd ~/Projects
+git clone git@github.com:zhiwww/hermes-agent.git
+cd hermes-agent
+git remote add upstream git@github.com:NousResearch/hermes-agent.git
+git remote set-url --push upstream no_push
 ```
 
-`.git/` is intentionally included so `git pull origin main` keeps working on home-.
-
-### Phase 2 — setup-hermes.sh on home-
+### Phase 2 — setup-hermes.sh
 
 ```sh
-ssh home- 'cd ~/Projects/hermes-agent && printf "n\n" | ./setup-hermes.sh'
+cd ~/Projects/hermes-agent
+printf "n\n" | ./setup-hermes.sh
 ```
 
 Creates `~/Projects/hermes-agent/venv`, runs `uv sync --all-extras --locked`,
@@ -160,11 +139,10 @@ Python processes using this venv automatically inject it at startup.
 This makes Python `ssl` delegate to macOS Security framework (Keychain).
 
 ```sh
-ssh home- '
 VENV=~/Projects/hermes-agent/venv
 VIRTUAL_ENV=$VENV uv pip install truststore
-SITE=$($VENV/bin/python -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")
-cat > "$SITE/sitecustomize.py" << "PY"
+SITE=$("$VENV/bin/python" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+cat > "$SITE/sitecustomize.py" << 'PY'
 """Auto-injected at Python startup: use macOS/OS trust store for TLS.
 Makes Python httpx/requests/etc. trust any CA in macOS Keychain
 (matches curl/Safari behavior). No code changes in hermes required.
@@ -175,18 +153,17 @@ try:
 except Exception:
     pass
 PY
-'
 ```
 
 **Verify**:
 ```sh
-ssh home- '~/Projects/hermes-agent/venv/bin/python -c "
+~/Projects/hermes-agent/venv/bin/python -c "
 import ssl, httpx
 ctx = ssl.create_default_context()
-assert \"truststore\" in type(ctx).__module__, \"truststore not active\"
-r = httpx.get(\"https://llm.zwi/v1/models\", timeout=15)
-print(\"OK\", r.status_code)
-"'
+assert 'truststore' in type(ctx).__module__, 'truststore not active'
+r = httpx.get('https://llm.zwi/v1/models', timeout=15)
+print('OK', r.status_code)
+"
 ```
 
 Should print `OK 401` (401 is expected without api key). If you see
@@ -196,19 +173,20 @@ Should print `OK 401` (401 is expected without api key). If you see
 **Skip this phase if** all LLM endpoints use public CAs (OpenAI, Anthropic,
 Codex via chatgpt.com, public OpenRouter endpoints, etc.).
 
-### Phase 3 — rsync staging → remote HERMES_HOME
+### Phase 3 — seed HERMES_HOME
 
-```sh
-rsync -avz /tmp/hermes-home-staging/ home-:.hermes/
-```
-
-**Do NOT pass `--delete`** — we must preserve `~/.hermes/skills/` seeded in Phase 2.
+The 2026-04-10 bootstrap rsync'd a pre-modified staging tree from the
+workstation's `/tmp/hermes-home-staging/` to home-'s `~/.hermes/`. On
+a fresh install today, place your `config.yaml`, `.env`, `honcho.json`,
+`SOUL.md`, `cron/`, `profiles/*/` etc. directly under `~/.hermes/` on
+the target machine. Preserve whatever `setup-hermes.sh` already seeded
+in `~/.hermes/skills/` — don't overwrite it.
 
 ### Phase 4 — verify
 
 ```sh
-ssh home- '~/.local/bin/hermes status'
-ssh home- '~/.local/bin/hermes doctor'
+hermes status
+hermes doctor
 ```
 
 `hermes doctor` will report 1 migration issue (config schema bump). **See the
@@ -253,12 +231,11 @@ which calls `_expand_env_vars()`. It's only `doctor --fix`'s write-back
 that loses the indirection.
 
 **Workaround**: run the fix, then immediately re-apply the env var
-references (and sync staging back from the fixed file):
+references in place:
 
 ```sh
-ssh home- '~/.local/bin/hermes doctor --fix'
-ssh home- "sed -i '' 's|api_key: sk-G44kshLqGjulGtUd0_vo8A|api_key: \${LLM_ZWI_API_KEY}|g' ~/.hermes/config.yaml"
-scp home-:.hermes/config.yaml /tmp/hermes-home-staging/config.yaml
+hermes doctor --fix
+sed -i '' 's|api_key: sk-G44kshLqGjulGtUd0_vo8A|api_key: ${LLM_ZWI_API_KEY}|g' ~/.hermes/config.yaml
 ```
 
 Or: **never run `hermes doctor --fix`** and accept the schema version
@@ -280,14 +257,16 @@ canonicalizes the path, so `hermes --version` shows
 `Project: /Volumes/Store/Projects/hermes-agent`. This is **not** a
 separate install — same directory, different path.
 
-## Rollback
+## Rollback (nuclear — destroys state)
 
 ```sh
-ssh home- 'rm -rf ~/Projects/hermes-agent ~/.hermes ~/.local/bin/hermes'
+rm -rf ~/Projects/hermes-agent ~/.hermes ~/.local/bin/hermes
 ```
 
 This removes the fork clone, HERMES_HOME (including migrated state),
-and the CLI symlink. `~/.zshrc` was not modified.
+and the CLI symlink. `~/.zshrc` was not modified during the initial
+bootstrap. For less drastic rollback (bad upgrade, revert a commit),
+see the Rollback subsection under "Version updates" below.
 
 ## Post-deployment: install gateway services
 
@@ -295,11 +274,11 @@ Each profile has its own gateway launchd service. After Phase 3:
 
 ```sh
 # Default profile gateway
-ssh home- '~/.local/bin/hermes gateway install'
+hermes gateway install
 
 # Per-profile — create alias first so hermes -p <name> works, then install
-ssh home- '~/.local/bin/hermes profile alias coder && ~/.local/bin/hermes -p coder gateway install'
-ssh home- '~/.local/bin/hermes profile alias ea    && ~/.local/bin/hermes -p ea gateway install'
+hermes profile alias coder && hermes -p coder gateway install
+hermes profile alias ea    && hermes -p ea gateway install
 ```
 
 This creates three launchd plists:
@@ -318,65 +297,55 @@ setup. Logs should show three distinct `Authenticated as @<bot>` lines:
 ## Version updates / upgrading the fork
 
 Routine workflow when upstream ships new commits or you add local fork
-patches. **All steps run on home-** — via `ssh home- '...'` from any
-laptop, or local-on-home- by dropping the ssh wrapper.
+patches. All commands run on home- locally.
 
-### Step 1 — sync upstream on home-
+### Step 1 — sync upstream
 
 ```sh
-ssh home- '
 cd ~/Projects/hermes-agent
 git status                                       # must be clean
 git fetch upstream
 git log --oneline main..upstream/main            # preview new commits
 git diff main..upstream/main -- pyproject.toml package.json hermes_constants.py
-'
 ```
 
 Review the commit list and the diff of the 3 conflict-prone files.
-Decide whether to merge. If clean, proceed:
+If clean, proceed:
 
 ```sh
-ssh home- '
-cd ~/Projects/hermes-agent
 git merge upstream/main --no-ff -m "chore: sync upstream $(date +%Y-%m-%d)"
-'
 ```
 
 If the merge reports conflicts in `pyproject.toml`, `package.json`, or
-`hermes_constants.py`, resolve them on home- (easiest via local-on-home-
-shell or VS Code Remote SSH):
+`hermes_constants.py`, resolve them in place:
 
 ```sh
-ssh home- 'cd ~/Projects/hermes-agent && git status'
+git status                                       # see conflicted files
 # For each conflicted file:
-#   ssh home- "cd ~/Projects/hermes-agent && git checkout --theirs <file>"
-#   # then manually re-apply the fork patch (authors, URLs, env override)
-#   ssh home- "cd ~/Projects/hermes-agent && git add <file>"
-# Finally:
-ssh home- 'cd ~/Projects/hermes-agent && git merge --continue'
+git checkout --theirs <file>                     # take upstream
+# then manually re-apply the fork patch (authors, URLs, env override)
+git add <file>
+git merge --continue
 ```
 
-### Step 2 — push merged main back to origin (from home-)
+### Step 2 — push merged main back to origin
 
 ```sh
-ssh home- 'cd ~/Projects/hermes-agent && git push origin main'
+git push origin main
 ```
 
-home- now IS the source of truth. No rsync step needed — the code
-change is already present because home- is where the merge happened.
+No rsync step needed — the merge happened on home-, which is the source
+of truth.
 
 ### Step 3 — refresh deps (only if `pyproject.toml` / `uv.lock` changed)
 
 ```sh
-ssh home- '
 cd ~/Projects/hermes-agent
 VIRTUAL_ENV=venv uv sync --all-extras --locked
-'
 ```
 
-Safe to skip if the merge didn't touch the lockfile. If the merge
-re-created `venv/` (e.g. via aggressive clean), see Step 4.
+Safe to skip if the merge didn't touch the lockfile. If the venv was
+rebuilt or cleaned, re-check Step 4.
 
 ### Step 4 — re-verify `sitecustomize.py` + `truststore`
 
@@ -384,42 +353,38 @@ Only needed if the venv was rebuilt, Python minor version changed, or
 certifi was reinstalled. Quick check:
 
 ```sh
-ssh home- '~/Projects/hermes-agent/venv/bin/python -c "
+~/Projects/hermes-agent/venv/bin/python -c "
 import ssl
 ctx = ssl.create_default_context()
-assert \"truststore\" in type(ctx).__module__, \"FIX: re-run Phase 2.5\"
-print(\"OK truststore still active\")
-"'
+assert 'truststore' in type(ctx).__module__, 'FIX: re-run Phase 2.5'
+print('OK truststore still active')
+"
 ```
 
-If this fails, re-run Phase 2.5 (install `truststore` + recreate
-`sitecustomize.py`).
+If this fails, re-apply the Phase 2.5 steps (install `truststore` +
+recreate `sitecustomize.py`) as local commands.
 
 ### Step 5 — restart all gateway services
 
 ```sh
-ssh home- '
-  ~/.local/bin/hermes gateway restart
-  ~/.local/bin/hermes -p coder gateway restart
-  ~/.local/bin/hermes -p ea gateway restart
-'
+hermes gateway restart
+hermes -p coder gateway restart
+hermes -p ea gateway restart
 ```
 
 ### Step 6 — verify
 
 ```sh
 # All 3 gateways running
-ssh home- 'launchctl list | grep ai.hermes.gateway'
+launchctl list | grep ai.hermes.gateway
 
 # Recent logs — look for "Authenticated as @<bot>" and no recent errors
-ssh home- '
-  for P in default coder ea; do
-    B=~/.hermes
-    [ "$P" = default ] || B=~/.hermes/profiles/$P
-    echo "--- $P ---"
-    grep -E "Authenticated as|response ready|API call failed" $B/logs/gateway.log | tail -3
-  done
-'
+for P in default coder ea; do
+  B=~/.hermes
+  [ "$P" = default ] || B=~/.hermes/profiles/$P
+  echo "--- $P ---"
+  grep -E "Authenticated as|response ready|API call failed" $B/logs/gateway.log | tail -3
+done
 ```
 
 Then test each bot via Slack (if you changed anything in message
@@ -428,33 +393,26 @@ handling, auth, or providers).
 ### Step 7 — commit and push any new `[fork]` patches
 
 If the upgrade prompted local fork fixes (doc updates, new gotcha
-patches, etc.), commit them on home- and push:
+patches, etc.):
 
 ```sh
-ssh home- '
 cd ~/Projects/hermes-agent
 git add <files>
 git commit -m "[fork] ..."
 git push origin main
-'
 ```
 
 ### Rollback of a failed upgrade
 
 ```sh
-# Find the previous-known-good SHA from the log
-ssh home- 'cd ~/Projects/hermes-agent && git log --oneline -20'
+cd ~/Projects/hermes-agent
+git log --oneline -20                            # find previous-known-good SHA
+git reset --hard <previous-sha>
+git push --force-with-lease origin main          # ONLY if the bad commit was already pushed
 
-# Reset to it (only force-push if you already pushed the bad commit)
-ssh home- 'cd ~/Projects/hermes-agent && git reset --hard <previous-sha>'
-ssh home- 'cd ~/Projects/hermes-agent && git push --force-with-lease origin main'  # ONLY if needed
-
-# Restart gateways
-ssh home- '
-  ~/.local/bin/hermes gateway restart
-  ~/.local/bin/hermes -p coder gateway restart
-  ~/.local/bin/hermes -p ea gateway restart
-'
+hermes gateway restart
+hermes -p coder gateway restart
+hermes -p ea gateway restart
 ```
 
 ## Post-deployment TODO

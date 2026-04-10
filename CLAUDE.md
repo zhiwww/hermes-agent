@@ -21,41 +21,30 @@
 - ❌ **不要在代码里硬编码** `zhiwww` / Docker Hub token / fork 专属 URL — 敏感信息走 GitHub Secrets，URL 走 env 变量。
 - ❌ **不要为了「让 diff 更干净」重构上游代码** — 每一次无关重构都会放大未来 merge 冲突。
 - ❌ **不要 "修复" 上游自己也没修的警告/错误** — 如果上游 CI 长期容忍某个 warning（比如 FlakeHub 认证失败），fork 也应该容忍。试图单方面修复会引入上游文件改动，得不偿失。先查上游 CI 状态再决定是否动手。
-- ❌ **不要在 workstation 上做任何 hermes 运维** — **home- 是唯一的 single source of truth**。所有 git 操作（fetch/merge upstream、commit、push）和 runtime 操作（gateway restart、config 编辑、rsync、launchd 变更）一律在 home- 上进行。详情见下一节。
+## home- 是唯一的工作机 ⚠️
 
-## home- 是唯一的运维入口 ⚠️
+这个 fork 只在 home-（`zwi-mini.tail30560e.ts.net`）上运行和维护。**所有 Claude Code 会话和命令都直接在 home- 本地执行**，不需要 ssh wrapper，不需要 rsync，没有 workstation 这个概念。
 
-**2026-04-10 决策变更**：从这一刻起，hermes 的所有维护都在 home- 上进行。workstation 不再参与。
+仓库结构：
+- `~/Projects/hermes-agent/` — fork 仓库 + venv + truststore 注入
+- `~/.hermes/` — HERMES_HOME（config / secrets / skills / profiles）
+- `~/Library/LaunchAgents/ai.hermes.gateway*.plist` — 3 个 profile 的 gateway launchd 服务
+- `~/.local/bin/hermes` → venv/bin/hermes
 
-| 机器 | 角色 | 状态 |
-|---|---|---|
-| **home-**（Tailscale `zwi-mini.tail30560e.ts.net`）| **唯一**的 git + runtime 入口 | `~/Projects/hermes-agent`（repo + venv + 3 gateway launchd 服务）+ `~/.hermes/`（HERMES_HOME） |
-| **workstation**（zwi 的日常 Mac）| **不参与** hermes 运维 | 可能还有 `~/Projects/hermes-agent` 的历史 checkout，但**不应该在这里做任何修改**。最终应删除或保留为只读参考 |
+已验证的能力（2026-04-10）：
+- ✅ `ssh -T git@github.com` → `Hi zhiwww!`（GitHub SSH auth，push/pull 可用）
+- ✅ `git config user.email=zhiwww@gmail.com`, `user.name=Wei Zhi`
+- ✅ `upstream` remote 的 push URL 锁成 `no_push`
+- ✅ venv 里 `truststore` + `sitecustomize.py` → Python 自动使用 macOS Keychain 信任链
 
-home- 的能力确认（2026-04-10）：
-- ✅ GitHub SSH auth (`ssh -T git@github.com` 返回 `Hi zhiwww!`)
-- ✅ `git fetch upstream` + `git push origin main` 可用
-- ✅ `git config user.email=zhiwww@gmail.com`, `user.name=Wei Zhi` 已配置
-- ✅ upstream push URL 设为 `no_push`（意外保护）
-- ✅ venv + truststore + 3 个 launchd gateway 服务运行中
+### 原则
 
-### 操作原则
+- **所有命令直接在 home- 本地运行** —— `docs/local/deploy-home.md` 里的命令都是裸命令，没有 ssh wrapper
+- **别把 hermes 装回别的机器** —— 单机模型，无同步负担
+- **别 `git push upstream`** —— push URL 已是 `no_push`，但心里要清楚
+- 执行前快速 `hostname` 确认是 `zwi-mini`
 
-1. **所有命令都在 home- 上执行**，两种访问方式：
-   - **Remote**：从 workstation（或任意机器）`ssh home- '...'`
-   - **Local-on-home-**：直接 ssh 进 home- / tmux 会话内运行
-2. **绝不在 workstation 上编辑 `~/Projects/hermes-agent/` 任何文件** —— workstation 的 checkout 是历史快照，已脱离同步链路
-3. **绝不在 workstation 上尝试 `hermes` CLI、`gateway restart`、`~/.hermes/` 相关操作** —— workstation 根本没装 hermes
-
-### 常见错误（来自早期双机模式的历史）
-
-以下错误模式在 workstation-as-git-host 时代出现过，现在都不应发生：
-- ❌ 在 workstation 编辑 `config.yaml` / source file 再 rsync（现在直接在 home- 上编辑）
-- ❌ 在 workstation 跑 `git merge upstream` 然后 rsync 推到 home-（现在直接 ssh 到 home- 做 merge）
-- ❌ rsync 源和目标搞反（不再需要 rsync，`git pull` 代替）
-- ❌ 两边 git 历史不同步（home- 是唯一源，不会不同步）
-
-命令模板和完整的版本升级流程见 `docs/local/deploy-home.md` 的「Version updates / upgrading the fork」段。
+完整的版本升级流程见 `docs/local/deploy-home.md` 的「Version updates / upgrading the fork」段。
 
 ## 诊断启发式（排查问题前必看）
 
