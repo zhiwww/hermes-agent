@@ -1082,9 +1082,19 @@ class AIAgent:
                             "hermes_home": str(_ghh()),
                             "agent_context": "primary",
                         }
-                        # Thread gateway user identity for per-user memory scoping
+                        # Thread gateway user identity for per-user memory scoping.
+                        # Apply platform prefix + alias mapping (memory-scope only).
+                        # See agent/peer_id_mapping.py for the rationale and format.
+                        from agent.peer_id_mapping import resolve_memory_peer_id
+                        _aliases = _agent_cfg.get("memory", {}).get("peer_id_aliases") if _agent_cfg else None
                         if self._user_id:
-                            _init_kwargs["user_id"] = self._user_id
+                            _resolved_peer = resolve_memory_peer_id(
+                                user_id=self._user_id,
+                                platform=_init_kwargs["platform"],
+                                aliases=_aliases,
+                            )
+                            if _resolved_peer:
+                                _init_kwargs["user_id"] = _resolved_peer
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
