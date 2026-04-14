@@ -139,6 +139,22 @@ class TestSendOrEditMediaStripping:
 
         adapter.send.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_cursor_only_update_skips_send(self):
+        """A bare streaming cursor should not be sent as its own message."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor=" ▉"),
+        )
+        await consumer._send_or_edit(" ▉")
+
+        adapter.send.assert_not_called()
+
 
 # ── Integration: full stream run ─────────────────────────────────────────
 
@@ -505,3 +521,162 @@ class TestSegmentBreakOnToolBoundary:
         assert len(sent_texts) == 3
         assert sent_texts[0].startswith(prefix)
         assert sum(len(t) for t in sent_texts[1:]) == len(tail)
+
+
+class TestInterimCommentaryMessages:
+    @pytest.mark.asyncio
+    async def test_commentary_message_stays_separate_from_final_stream(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        consumer.on_commentary("I'll inspect the repository first.")
+        consumer.on_delta("Done.")
+        consumer.finish()
+
+        await consumer.run()
+
+        sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["I'll inspect the repository first.", "Done."]
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_failed_final_send_does_not_mark_final_response_sent(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=False, message_id=None))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        consumer.on_delta("Done.")
+        consumer.finish()
+
+        await consumer.run()
+
+        assert consumer.final_response_sent is False
+        assert consumer.already_sent is False
+
+    @pytest.mark.asyncio
+    async def test_success_without_message_id_marks_visible_and_sends_only_tail(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id=None),
+            SimpleNamespace(success=True, message_id=None),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor=" ▉"),
+        )
+
+        consumer.on_delta("Hello")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+        consumer.on_delta(" world")
+        await asyncio.sleep(0.08)
+        consumer.finish()
+        await task
+
+        sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["Hello ▉", "world"]
+        assert consumer.already_sent is True
+        assert consumer.final_response_sent is True
+
+
+class TestCancelledConsumerSetsFlags:
+    """Cancellation must set final_response_sent when already_sent is True.
+
+    The 5-second stream_task timeout in gateway/run.py can cancel the
+    consumer while it's still processing.  If final_response_sent stays
+    False, the gateway falls through to the normal send path and the
+    user sees a duplicate message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancelled_with_already_sent_marks_final_response_sent(self):
+        """Cancelling after content was sent should set final_response_sent."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True)
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        # Stream some text — the consumer sends it and sets already_sent
+        consumer.on_delta("Hello world")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        assert consumer.already_sent is True
+
+        # Cancel the task (simulates the 5-second timeout in gateway)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # The fix: final_response_sent should be True even though _DONE
+        # was never processed, preventing a duplicate message.
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled_without_any_sends_does_not_mark_final(self):
+        """Cancelling before anything was sent should NOT set final_response_sent."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=False, message_id=None)
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True)
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        # Send fails — already_sent stays False
+        consumer.on_delta("x")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        assert consumer.already_sent is False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Without a successful send, final_response_sent should stay False
+        # so the normal gateway send path can deliver the response.
+        assert consumer.final_response_sent is False
