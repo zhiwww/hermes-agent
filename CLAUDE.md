@@ -11,7 +11,7 @@
 
 1. **能新增文件就不改上游文件** — 零冲突的最佳方式是不碰它。workflows、配置、文档优先用 additive 方式扩展，不要原地修改。
 2. **能走 env / config 就不改代码** — 代码层面只做最小侵入（例如 `os.getenv(..., default)` 包装），把 diff 留在配置层。
-3. **必须改的文件尽量只改最少行数** — 目前已识别的修改点：`pyproject.toml` (authors)、`package.json` (repo URLs)、`hermes_constants.py` (env override)。新增本地化时优先评估能否塞进已有的改动点，而不是新开一个。
+3. **必须改的文件尽量只改最少行数** — 目前已识别的修改点：`pyproject.toml` (authors)、`package.json` (repo URLs)。新增本地化时优先评估能否塞进已有的改动点，而不是新开一个。
 
 ## 红线（永远不要做）
 
@@ -72,14 +72,61 @@ CI 或 workflow 失败时，**先问三个问题**再下手：
 
 ## Upstream 同步规范
 
-- 上游同步**一律用 merge，不用 rebase**。理由：保留上游 commit hash 可追溯，避免 force push 风险。
-- 同步命令模板：
-  ```sh
-  git fetch upstream
-  git log --oneline main..upstream/main   # 预览
-  git merge upstream/main --no-ff -m "chore: sync upstream $(date +%Y-%m-%d)"
-  ```
-- 已知可能冲突的 3 个文件：`pyproject.toml` / `package.json` / `hermes_constants.py`。解决模板：接受上游全部改动，再手动打回 fork 的小补丁。详见 `docs/local/fork-deployment-plan.md` 的「冲突处理预案」。
+上游同步**一律用 merge，不用 rebase**。理由：保留上游 commit hash 可追溯，避免 force push 风险。
+
+每次同步必须按以下 5 步顺序执行，不可跳步：
+
+### Step 1: Fetch & Preview
+
+```sh
+git fetch upstream
+git log --oneline main..upstream/main   # 预览新 commit
+```
+
+如果 `upstream/main` 没有新 commit，到此结束。
+
+### Step 2: Merge
+
+```sh
+git merge upstream/main --no-ff -m "chore: sync upstream $(date +%Y-%m-%d)"
+```
+
+- 已知可能冲突的文件：`pyproject.toml` / `package.json` / `hermes_constants.py`。
+- 解决模板：接受上游全部改动，再手动打回 fork 的小补丁（`pyproject.toml` 的 authors、`package.json` 的 repo URLs）。
+- 详见 `docs/local/fork-deployment-plan.md` 的「冲突处理预案」。
+
+### Step 3: Run Tests
+
+```sh
+uv pip install -e ".[dev]" --python venv/bin/python   # 先更新依赖
+pytest                                                  # 跑测试
+```
+
+- 对比上游 CI 状态：`gh run list --repo NousResearch/hermes-agent --workflow=Tests --branch main --limit 3`
+- 如果失败的测试**上游 CI 也在失败** → 不是 fork 的锅，可以继续。
+- 如果有 fork 独有的新失败 → 必须排查修复后才能继续。
+
+### Step 4: Restart & Verify Gateway
+
+```sh
+hermes gateway restart
+hermes -p coder gateway restart
+hermes -p ea gateway restart
+sleep 5
+launchctl list | grep ai.hermes.gateway    # 确认 3 个服务都在跑
+hermes --version                            # 确认版本号已更新
+```
+
+- 检查所有 3 个 PID 存在且进程状态正常（`ps -p <PIDs>`）。
+- 如果某个 gateway 挂了，查日志 `~/.hermes/profiles/<name>/logs/gateway.error.log`。
+
+### Step 5: Push
+
+```sh
+git push origin main
+```
+
+只有 Step 3 + Step 4 都通过后才能 push。
 
 ## Fork 专属约定
 
