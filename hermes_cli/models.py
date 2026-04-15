@@ -29,6 +29,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("qwen/qwen3.6-plus",               ""),
     ("anthropic/claude-sonnet-4.5",     ""),
     ("anthropic/claude-haiku-4.5",      ""),
+    ("openrouter/elephant-alpha",       "free"),
     ("openai/gpt-5.4",                  ""),
     ("openai/gpt-5.4-mini",             ""),
     ("xiaomi/mimo-v2-pro",               ""),
@@ -43,6 +44,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("minimax/minimax-m2.7",            ""),
     ("minimax/minimax-m2.5",            ""),
     ("z-ai/glm-5.1",                    ""),
+    ("z-ai/glm-5v-turbo",               ""),
     ("z-ai/glm-5-turbo",                ""),
     ("moonshotai/kimi-k2.5",            ""),
     ("x-ai/grok-4.20",                  ""),
@@ -88,6 +90,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "minimax/minimax-m2.7",
         "minimax/minimax-m2.5",
         "z-ai/glm-5.1",
+        "z-ai/glm-5v-turbo",
         "z-ai/glm-5-turbo",
         "moonshotai/kimi-k2.5",
         "x-ai/grok-4.20-beta",
@@ -97,6 +100,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "arcee-ai/trinity-large-thinking",
         "openai/gpt-5.4-pro",
         "openai/gpt-5.4-nano",
+        "openrouter/elephant-alpha",
     ],
     "openai-codex": _codex_curated_models(),
     "copilot-acp": [
@@ -132,6 +136,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "zai": [
         "glm-5.1",
         "glm-5",
+        "glm-5v-turbo",
         "glm-5-turbo",
         "glm-4.7",
         "glm-4.5",
@@ -1818,6 +1823,17 @@ def validate_requested_model(
                     "message": None,
                 }
 
+            # Auto-correct if the top match is very similar (e.g. typo)
+            auto = get_close_matches(requested_for_lookup, api_models, n=1, cutoff=0.9)
+            if auto:
+                return {
+                    "accepted": True,
+                    "persist": True,
+                    "recognized": True,
+                    "corrected_model": auto[0],
+                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                }
+
             suggestions = get_close_matches(requested, api_models, n=3, cutoff=0.5)
             suggestion_text = ""
             if suggestions:
@@ -1869,6 +1885,16 @@ def validate_requested_model(
                     "recognized": True,
                     "message": None,
                 }
+            # Auto-correct if the top match is very similar (e.g. typo)
+            auto = get_close_matches(requested_for_lookup, codex_models, n=1, cutoff=0.9)
+            if auto:
+                return {
+                    "accepted": True,
+                    "persist": True,
+                    "recognized": True,
+                    "corrected_model": auto[0],
+                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                }
             suggestions = get_close_matches(requested_for_lookup, codex_models, n=3, cutoff=0.5)
             suggestion_text = ""
             if suggestions:
@@ -1901,6 +1927,18 @@ def validate_requested_model(
             # the user may have access to models not shown in the public
             # listing (e.g. Z.AI Pro/Max plans can use glm-5 on coding
             # endpoints even though it's not in /models).  Warn but allow.
+
+            # Auto-correct if the top match is very similar (e.g. typo)
+            auto = get_close_matches(requested_for_lookup, api_models, n=1, cutoff=0.9)
+            if auto:
+                return {
+                    "accepted": True,
+                    "persist": True,
+                    "recognized": True,
+                    "corrected_model": auto[0],
+                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                }
+
             suggestions = get_close_matches(requested, api_models, n=3, cutoff=0.5)
             suggestion_text = ""
             if suggestions:
